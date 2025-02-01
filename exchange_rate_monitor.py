@@ -19,7 +19,7 @@ START_HOUR = 9
 END_HOUR = 16
 
 def fetch_exchange_rates():
-    """Запрашивает курсы валют на завтрашний день через API НБ РБ."""
+    """Запрашивает курсы валют через API НБ РБ."""
     print("Запрос данных с API...")
     response = requests.get(API_URL)
     if response.status_code == 200:
@@ -40,27 +40,31 @@ def fetch_exchange_rates():
     print("Ошибка при запросе данных с API.")
     return None
 
-def load_previous_rates():
-    """Загружает сохранённые курсы валют из локального файла."""
-    try:
-        with open(DATA_FILE, "r") as file:
-            print("Загрузка предыдущих курсов валют...")
-            return json.load(file)  # Загружаем JSON-данные
-    except (FileNotFoundError, json.JSONDecodeError):
-        print("Файл с курсами отсутствует или поврежден. Создаётся новый.")
-        return {}  # Если файл не найден или повреждён, возвращаем пустой словарь
+def determine_target_dates():
+    """Определяет даты, на которые устанавливается курс, с учётом выходных и понедельника."""
+    today = datetime.today()
+    tomorrow = today + timedelta(days=1)
+    weekday = today.weekday()
+    
+    if weekday == 4:  # Пятница, фиксируем курс на понедельник
+        monday = today + timedelta(days=3)
+        return [today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d"), monday.strftime("%Y-%m-%d")]
+    elif weekday == 3:  # Четверг, фиксируем курс на пятницу, субботу и воскресенье
+        weekend = today + timedelta(days=3)
+        return [today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d"), weekend.strftime("%Y-%m-%d")]
+    else:
+        return [today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d")]
 
 def save_rates(rates):
-    """Сохраняет текущие курсы валют с временной меткой в локальный файл."""
+    """Сохраняет курсы валют с временной меткой в локальный файл на несколько дней вперёд."""
+    target_dates = determine_target_dates()
     data = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "date": (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "rates": rates
+        "rates": {date: rates for date in target_dates}
     }
     with open(DATA_FILE, "w") as file:
         json.dump(data, file, indent=4)
-    print("Курсы валют сохранены с временной меткой.")
-
+    print("Курсы валют сохранены с временной меткой на несколько дней.")
 
 def log_change(currency, old_rate, new_rate):
     """Фиксирует изменение курса валюты в лог-файл."""
@@ -68,19 +72,16 @@ def log_change(currency, old_rate, new_rate):
     log_entry = f"[{timestamp}] {currency}: {old_rate} -> {new_rate}\n"
     with open(LOG_FILE, "a") as log_file:
         log_file.write(log_entry)
-    print(f"Зафиксировано изменение курса: {log_entry.strip()}")
+    print(f"Зафиксировано изменение курса: {log_entry.strip()}\n")
 
 def monitor_exchange_rates():
     """Запускает мониторинг курсов валют в рабочие часы."""
     print("Запуск мониторинга курсов валют...")
-    previous_rates = load_previous_rates()
-    if not previous_rates:
-        print("Сохранение начальных курсов валют...")
-        previous_rates = fetch_exchange_rates()
-        if previous_rates:
-            save_rates(previous_rates)
-        else:
-            print("Ошибка при получении данных с API НБ РБ.")
+    previous_rates = fetch_exchange_rates()
+    if previous_rates:
+        save_rates(previous_rates)
+    else:
+        print("Ошибка при получении данных с API НБ РБ.")
         return
     while True:
         now = datetime.now()

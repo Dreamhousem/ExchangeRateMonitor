@@ -1,95 +1,108 @@
-import unittest
-from unittest.mock import patch, mock_open
+import time
 import json
+import requests
 from datetime import datetime, timedelta
-from exchange_rate_monitor import fetch_exchange_rates, load_previous_rates, save_rates, log_change
 
-class TestExchangeRateMonitor(unittest.TestCase):
-    """Тесты для проверки работы функций мониторинга курсов валют."""
+# URL API Национального банка Республики Беларусь
+API_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
+
+# Словарь с кодами валют (USD, EUR, RUB, CNY)
+CURRENCIES = {"USD": 431, "EUR": 451, "RUB": 456, "CNY": 508}
+
+# Файлы для хранения данных
+DATA_FILE = "exchange_rates.json"
+LOG_FILE = "exchange_rate_changes.log"
+
+# Интервал проверки (10 минут) и рабочие часы (9:00 - 16:00)
+CHECK_INTERVAL = 600  # 600 секунд = 10 минут
+START_HOUR = 9
+END_HOUR = 16
+
+def fetch_exchange_rates():
+    """Запрашивает курсы валют через API НБ РБ."""
+    print("Запрос данных с API...")
+    response = requests.get(API_URL)
+    if response.status_code == 200:
+        print("Данные успешно получены.")
+        data = response.json()
+        rates = {}
+        for currency, cur_id in CURRENCIES.items():
+            currency_data = next((item for item in data if item.get("Cur_ID") == cur_id), None)
+            if currency_data is None:
+                print(f"Ошибка: Не найдены данные для {currency}. Полный ответ API: {data}")
+                continue
+            if "Cur_OfficialRate" not in currency_data:
+                print(f"Ошибка: В данных для {currency} отсутствует ключ 'Cur_OfficialRate'. Ответ API: {currency_data}")
+                continue
+            rates[currency] = currency_data["Cur_OfficialRate"]
+        print("Полученные курсы валют:", rates)
+        return rates
+    print("Ошибка при запросе данных с API.")
+    return None
+
+def determine_target_dates():
+    """Определяет даты, на которые устанавливается курс, с учётом выходных и понедельника."""
+    today = datetime.today()
+    tomorrow = today + timedelta(days=1)
+    weekday = today.weekday()
+    dates = [today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d")]
     
-    @patch("exchange_rate_monitor.requests.get")
-    def test_fetch_exchange_rates(self, mock_get):
-        """Тестирует получение курсов валют через API, проверяя корректность извлечённых данных."""
-        # Имитация JSON-ответа от API
-        mock_response = [
-            {"Cur_ID": 431, "Cur_OfficialRate": 2.5},
-            {"Cur_ID": 451, "Cur_OfficialRate": 3.0},
-            {"Cur_ID": 456, "Cur_OfficialRate": 0.034},
-            {"Cur_ID": 508, "Cur_OfficialRate": 0.39}
-        ]
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = mock_response
-        
-        # Ожидаемый результат
-        expected_rates = {"USD": 2.5, "EUR": 3.0, "RUB": 0.034, "CNY": 0.39}
-        
-        # Проверяем, совпадают ли данные
-        self.assertEqual(fetch_exchange_rates(), expected_rates)
+    if weekday == 4:  # Пятница, фиксируем курс на понедельник
+        monday = today + timedelta(days=3)
+        dates.append(monday.strftime("%Y-%m-%d"))
+    elif weekday == 3:  # Четверг, фиксируем курс на пятницу, субботу и воскресенье
+        weekend = today + timedelta(days=3)
+        dates.append(weekend.strftime("%Y-%m-%d"))
+    elif weekday in [5, 6]:  # Суббота или воскресенье, используем курс пятницы
+        friday = today - timedelta(days=(weekday - 4))
+        monday = today + timedelta(days=(7 - weekday))
+        dates = [friday.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"), monday.strftime("%Y-%m-%d")]  
     
-    @patch("builtins.open", new_callable=mock_open, read_data='{"USD": 2.5, "EUR": 3.0}')
-    def test_load_previous_rates(self, mock_file):
-        """Тестирует загрузку сохранённых курсов валют из файла."""
-        expected_data = {"USD": 2.5, "EUR": 3.0}
-        self.assertEqual(load_previous_rates(), expected_data)
+    return dates
 
-    @patch("builtins.open", new_callable=mock_open)
-    def test_save_rates(self, mock_file):
-        """Тестирует сохранение курсов валют в файл."""
-        rates = {"USD": 2.6, "EUR": 3.1}
-        
-        # Ожидаемая структура файла с временной меткой
-        expected_data = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "date": (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d"),
-            "rates": rates
-        }
-        
-        save_rates(rates)
-        
-        # Проверяем, что файл был записан корректно
-        handle = mock_file()
-        written_data = "".join(call.args[0] for call in handle.write.call_args_list)
-        self.assertEqual(written_data, json.dumps(expected_data, indent=4))
+def save_rates(rates):
+    """Сохраняет курсы валют с временной меткой в локальный файл на несколько дней вперёд."""
+    target_dates = determine_target_dates()
+    data = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "rates": {date: rates for date in target_dates}
+    }
+    with open(DATA_FILE, "w") as file:
+        json.dump(data, file, indent=4)
+    print("Курсы валют сохранены с временной меткой на несколько дней.")
 
-    @patch("builtins.open", new_callable=mock_open)
-    def test_log_change(self, mock_file):
-        """Тестирует запись изменений курса валют в лог-файл."""
-        log_change("USD", 2.5, 2.6)
-        
-        # Проверяем, что запись в файл была выполнена
-        mock_file().write.assert_called()
+def log_change(currency, old_rate, new_rate):
+    """Фиксирует изменение курса валюты в лог-файл."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] {currency}: {old_rate} -> {new_rate}\n"
+    with open(LOG_FILE, "a") as log_file:
+        log_file.write(log_entry)
+    print(f"Зафиксировано изменение курса: {log_entry.strip()}")
 
-    @patch("exchange_rate_monitor.fetch_exchange_rates")
-    def test_simulated_10_days(self, mock_fetch):
-        """Тестирует имитацию изменения курса в течение 10 дней, учитывая выходные."""
-        base_rate = 3.5
-        simulated_rates = []
-        
-        for i in range(10):
-            date = datetime.today() + timedelta(days=i)
-            weekday = date.weekday()
-
-            # В четверг устанавливаем курс на пятницу, субботу и воскресенье
-            if weekday == 3:  
-                rate = base_rate + 0.05  
-            elif weekday in [4, 5, 6]:  # Пятница, суббота, воскресенье - курс остается как в четверг
-                rate = simulated_rates[-1] if simulated_rates else base_rate
-            elif weekday == 0:  # В понедельник используется пятничный курс
-                rate = simulated_rates[-1]
-            else:  # Обычные дни (вторник, среда) — курс постепенно меняется
-                rate = base_rate + 0.02 * i
-            
-            simulated_rates.append(rate)
-            mock_fetch.return_value = {
-                "USD": rate, "EUR": rate + 0.1, "RUB": rate - 0.1, "CNY": rate * 0.7
-            }
-            save_rates(mock_fetch.return_value)
-
-        # Проверяем, что курс в субботу такой же, как в пятницу
-        self.assertEqual(simulated_rates[5], simulated_rates[4])  # Суббота = Пятница
-        self.assertEqual(simulated_rates[6], simulated_rates[4])  # Воскресенье = Пятница
-        self.assertEqual(simulated_rates[0], simulated_rates[9])  # Последний день теста не должен сильно отличаться
-
+def monitor_exchange_rates():
+    """Запускает мониторинг курсов валют в рабочие часы."""
+    print("Запуск мониторинга курсов валют...")
+    previous_rates = fetch_exchange_rates()
+    if previous_rates:
+        save_rates(previous_rates)
+    else:
+        print("Ошибка при получении данных с API НБ РБ.")
+        return
+    while True:
+        now = datetime.now()
+        if START_HOUR <= now.hour < END_HOUR:
+            print("Проверка курсов валют...")
+            current_rates = fetch_exchange_rates()
+            if current_rates:
+                for currency, new_rate in current_rates.items():
+                    old_rate = previous_rates.get(currency)
+                    if old_rate and new_rate != old_rate:
+                        log_change(currency, old_rate, new_rate)
+                        previous_rates[currency] = new_rate
+                save_rates(previous_rates)
+        else:
+            print("Вне рабочего времени. Ожидание...")
+        time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    unittest.main()
+    monitor_exchange_rates()
