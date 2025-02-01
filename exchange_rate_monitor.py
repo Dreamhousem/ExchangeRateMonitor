@@ -1,10 +1,10 @@
 import time
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # URL API Национального банка Республики Беларусь
-API_URL = "https://api.nbrb.by/exrates/currencies"
+API_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
 
 # Словарь с кодами валют (USD, EUR, RUB, CNY)
 CURRENCIES = {"USD": 431, "EUR": 451, "RUB": 456, "CNY": 508}
@@ -19,7 +19,7 @@ START_HOUR = 9
 END_HOUR = 16
 
 def fetch_exchange_rates():
-    """Запрашивает текущие курсы валют через API НБ РБ."""
+    """Запрашивает курсы валют на завтрашний день через API НБ РБ."""
     print("Запрос данных с API...")
     response = requests.get(API_URL)
     if response.status_code == 200:
@@ -27,10 +27,14 @@ def fetch_exchange_rates():
         data = response.json()
         rates = {}
         for currency, cur_id in CURRENCIES.items():
-            for item in data:
-                if item["Cur_ID"] == cur_id:
-                    rates[currency] = item["Cur_OfficialRate"]  # Извлекаем курс валюты
-                    break
+            currency_data = next((item for item in data if item.get("Cur_ID") == cur_id), None)
+            if currency_data is None:
+                print(f"Ошибка: Не найдены данные для {currency}. Полный ответ API: {data}")
+                continue
+            if "Cur_OfficialRate" not in currency_data:
+                print(f"Ошибка: В данных для {currency} отсутствует ключ 'Cur_OfficialRate'. Ответ API: {currency_data}")
+                continue
+            rates[currency] = currency_data["Cur_OfficialRate"]
         print("Полученные курсы валют:", rates)
         return rates
     print("Ошибка при запросе данных с API.")
@@ -43,51 +47,56 @@ def load_previous_rates():
             print("Загрузка предыдущих курсов валют...")
             return json.load(file)  # Загружаем JSON-данные
     except (FileNotFoundError, json.JSONDecodeError):
-        print("Файл с курсами отсутствует или поврежден. Используется пустой словарь.")
+        print("Файл с курсами отсутствует или поврежден. Создаётся новый.")
         return {}  # Если файл не найден или повреждён, возвращаем пустой словарь
 
 def save_rates(rates):
-    """Сохраняет текущие курсы валют в локальный файл."""
+    """Сохраняет текущие курсы валют с временной меткой в локальный файл."""
+    data = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "date": (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d"),
+        "rates": rates
+    }
     with open(DATA_FILE, "w") as file:
-        json.dump(rates, file, indent=4)  # Записываем данные в формате JSON
-    print("Курсы валют сохранены.")
+        json.dump(data, file, indent=4)
+    print("Курсы валют сохранены с временной меткой.")
+
 
 def log_change(currency, old_rate, new_rate):
     """Фиксирует изменение курса валюты в лог-файл."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Получаем текущее время
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{timestamp}] {currency}: {old_rate} -> {new_rate}\n"
     with open(LOG_FILE, "a") as log_file:
-        log_file.write(log_entry)  # Записываем лог изменений
+        log_file.write(log_entry)
     print(f"Зафиксировано изменение курса: {log_entry.strip()}")
 
 def monitor_exchange_rates():
     """Запускает мониторинг курсов валют в рабочие часы."""
     print("Запуск мониторинга курсов валют...")
-    previous_rates = load_previous_rates()  # Загружаем предыдущие курсы
+    previous_rates = load_previous_rates()
     if not previous_rates:
         print("Сохранение начальных курсов валют...")
         previous_rates = fetch_exchange_rates()
         if previous_rates:
-            save_rates(previous_rates)  # Если данные получены, сохраняем их
+            save_rates(previous_rates)
         else:
             print("Ошибка при получении данных с API НБ РБ.")
         return
-
     while True:
         now = datetime.now()
-        if START_HOUR <= now.hour < END_HOUR:  # Проверяем, в рабочие ли часы выполняется проверка
+        if START_HOUR <= now.hour < END_HOUR:
             print("Проверка курсов валют...")
             current_rates = fetch_exchange_rates()
             if current_rates:
                 for currency, new_rate in current_rates.items():
                     old_rate = previous_rates.get(currency)
                     if old_rate and new_rate != old_rate:
-                        log_change(currency, old_rate, new_rate)  # Фиксируем изменение курса
-                        previous_rates[currency] = new_rate  # Обновляем сохранённые данные
-                save_rates(previous_rates)  # Сохраняем обновленные курсы
+                        log_change(currency, old_rate, new_rate)
+                        previous_rates[currency] = new_rate
+                save_rates(previous_rates)
         else:
             print("Вне рабочего времени. Ожидание...")
-        time.sleep(CHECK_INTERVAL)  # Ожидаем заданное время перед следующей проверкой
+        time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    monitor_exchange_rates()  # Запускаем мониторинг
+    monitor_exchange_rates()
