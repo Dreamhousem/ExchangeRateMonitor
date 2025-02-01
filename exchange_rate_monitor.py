@@ -4,7 +4,7 @@ import requests
 from datetime import datetime, timedelta
 
 # URL API Национального банка Республики Беларусь
-API_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
+API_URL = "https://api.nbrb.by/exrates/rates"
 
 # Словарь с кодами валют (USD, EUR, RUB, CNY)
 CURRENCIES = {"USD": 431, "EUR": 451, "RUB": 456, "CNY": 508}
@@ -18,10 +18,14 @@ CHECK_INTERVAL = 600  # 600 секунд = 10 минут
 START_HOUR = 9
 END_HOUR = 16
 
-def fetch_exchange_rates():
-    """Запрашивает курсы валют через API НБ РБ."""
-    print("Запрос данных с API...")
-    response = requests.get(API_URL)
+def fetch_exchange_rates(date=None):
+    """Запрашивает курсы валют через API НБ РБ на указанную дату."""
+    params = {"periodicity": 0}
+    if date:
+        params["ondate"] = date.strftime("%Y-%m-%d")
+    
+    print(f"Запрос данных с API на {params.get('ondate', 'сегодня')}...")
+    response = requests.get(API_URL, params=params)
     if response.status_code == 200:
         print("Данные успешно получены.")
         data = response.json()
@@ -45,23 +49,31 @@ def determine_target_dates():
     today = datetime.today()
     tomorrow = today + timedelta(days=1)
     weekday = today.weekday()
+    dates = [today, tomorrow]
     
     if weekday == 4:  # Пятница, фиксируем курс на понедельник
         monday = today + timedelta(days=3)
-        return [today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d"), monday.strftime("%Y-%m-%d")]
+        dates.append(monday)
     elif weekday == 3:  # Четверг, фиксируем курс на пятницу, субботу и воскресенье
         weekend = today + timedelta(days=3)
-        return [today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d"), weekend.strftime("%Y-%m-%d")]
-    else:
-        return [today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d")]
+        dates.append(weekend)
+    elif weekday in [5, 6]:  # Суббота или воскресенье, используем курс пятницы
+        friday = today - timedelta(days=(weekday - 4))
+        monday = today + timedelta(days=(7 - weekday))
+        dates = [friday, today, monday]  
+    
+    return dates
 
-def save_rates(rates):
+def save_rates():
     """Сохраняет курсы валют с временной меткой в локальный файл на несколько дней вперёд."""
     target_dates = determine_target_dates()
-    data = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "rates": {date: rates for date in target_dates}
-    }
+    data = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "rates": {}}
+    
+    for date in target_dates:
+        rates = fetch_exchange_rates(date)
+        if rates:
+            data["rates"][date.strftime("%Y-%m-%d")] = rates
+    
     with open(DATA_FILE, "w") as file:
         json.dump(data, file, indent=4)
     print("Курсы валют сохранены с временной меткой на несколько дней.")
@@ -72,29 +84,17 @@ def log_change(currency, old_rate, new_rate):
     log_entry = f"[{timestamp}] {currency}: {old_rate} -> {new_rate}\n"
     with open(LOG_FILE, "a") as log_file:
         log_file.write(log_entry)
-    print(f"Зафиксировано изменение курса: {log_entry.strip()}\n")
+    print(f"Зафиксировано изменение курса: {log_entry.strip()}")
 
 def monitor_exchange_rates():
     """Запускает мониторинг курсов валют в рабочие часы."""
     print("Запуск мониторинга курсов валют...")
-    previous_rates = fetch_exchange_rates()
-    if previous_rates:
-        save_rates(previous_rates)
-    else:
-        print("Ошибка при получении данных с API НБ РБ.")
-        return
+    save_rates()
     while True:
         now = datetime.now()
         if START_HOUR <= now.hour < END_HOUR:
             print("Проверка курсов валют...")
-            current_rates = fetch_exchange_rates()
-            if current_rates:
-                for currency, new_rate in current_rates.items():
-                    old_rate = previous_rates.get(currency)
-                    if old_rate and new_rate != old_rate:
-                        log_change(currency, old_rate, new_rate)
-                        previous_rates[currency] = new_rate
-                save_rates(previous_rates)
+            save_rates()
         else:
             print("Вне рабочего времени. Ожидание...")
         time.sleep(CHECK_INTERVAL)
